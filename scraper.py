@@ -1,7 +1,10 @@
 import re
+import warnings
 from urllib.parse import urlparse, urljoin, urldefrag
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from collections import defaultdict
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 #global data structures for report
 unique_pages = set()
@@ -38,71 +41,71 @@ def scraper(url, resp):
     defrag_url, _ = urldefrag(url)
     if defrag_url in unique_pages:
         return []
+    # if seen, mark as seen so it won't be proccessed again
+    unique_pages.add(defrag_url)
     
     #only now do the expensive parsing
     links = extract_next_links(defrag_url, resp)
     return [link for link in links if is_valid(link)]
 
 def extract_next_links(url, resp):
-    #validate response
-    if resp.status != 200 or resp.raw_response is None:
+    if resp.status != 200 or not resp.raw_response:
+        return []
+    content_type = resp.raw_response.headers.get("Content-Type", "").lower()
+
+    #validate response, avoid xml traps and non-html files
+    if "text/html" not in content_type or "xml" in content_type:
         return []
     
     content_type = resp.raw_response.headers.get("Content-Type", "")
     if "text/html" not in content_type:
         return []
     
-    #defragment and record the URL as a unique page
-    defrag_url, _ = urldefrag(url)
-    
-    if defrag_url in unique_pages:
-        return []
-    unique_pages.add(defrag_url)
-    
     #track subdomains for ics.uci.edu
-    parsed_url = urlparse(defrag_url)
+    parsed_url = urlparse(url)
     hostname = parsed_url.hostname  # e.g. vision.ics.uci.edu
     if hostname and hostname.endswith(".uci.edu"):
         # Extract just the subdomain portion
-        subdomains[hostname].add(defrag_url)
+        subdomains[hostname].add(url)
     
-    #parse the HTML
-    soup = BeautifulSoup(resp.raw_response.content, "lxml")
-    
-    #extract and count words for report
-    text = soup.get_text()
-    #only words with 2+ letters
-    words = re.findall(r"[a-zA-Z]{2,}", text.lower()) 
-    filtered_words = [w for w in words if w not in STOP_WORDS]
-    
-    word_count = len(words)
-    
-    #update longest page
-    if word_count > longest_page["word_count"]:
-        longest_page["url"] = defrag_url
-        longest_page["word_count"] = word_count
-    
-    #update global word frequencies
-    for word in filtered_words:
-        word_frequencies[word] += 1
-    
-    #extract and return all valid links
-    found_links = []
-    for tag in soup.find_all("a", href=True):
-        href = tag["href"].strip()
-        #make relative URLs absolute
-        absolute_url = urljoin(defrag_url, href)
-        #remove fragment
-        clean_url, _ = urldefrag(absolute_url)
-        found_links.append(clean_url)
-    
-    return found_links
+    try:
+        # parse the HTML
+        soup = BeautifulSoup(resp.raw_response.content, "lxml")
+        
+        # extract and count words for report
+        text = soup.get_text()
+        #only words with 2+ letters
+        words = re.findall(r"[a-zA-Z]{2,}", text.lower())
+            
+        # update longest page
+        if len(words) > longest_page["word_count"]:
+            longest_page["url"] = url
+            longest_page["word_count"] = len(words)
+        
+        # update global word frequencies
+        for word in words:
+            if word not in STOP_WORDS:
+                word_frequencies[word] += 1
+        
+        # extract and return all valid links
+        found_links = []
+        for tag in soup.find_all("a", href=True):
+            href = tag["href"].strip()
+            absolute_url = urljoin(url, href)
+            clean_url, _ = urldefrag(absolute_url)
+            found_links.append(clean_url)
+        
+        return found_links
 
+    except Exception as e:
+        print(f"Error parsing {url}: {e}")
+        return []
 
 #makes sure that the URL is valid and within the allowed domains, and does not point to non-content files
 def is_valid(url):
     try:
         parsed = urlparse(url)
+        url_lower = url.lower()
         
         if parsed.scheme not in {"http", "https"}:
             return False
@@ -120,6 +123,33 @@ def is_valid(url):
         ]
         
         if not any(hostname.endswith(domain) for domain in allowed_domains):
+            return False
+
+        # --- TRAP FILTERING SECTION ---
+            
+        # block common path traps
+        path_lower = parsed.path.lower()
+        if any(x in path_lower for x in ["doku.php", "ical", "tribe", "events", "pix"]):
+            return False
+        
+        # block repeat directory traps (e.g., /folder/folder/folder/)
+        if re.match(r"^.*?(.+?/).*?\1.*?\1.*$", path_lower):
+            return False
+        
+        # block grape.ics
+        if "grape.ics.uci.edu" in hostname:
+            return False
+        
+        # block subdomains for calendars/dynamic content
+        if any(sub in hostname for sub in ["wics.ics.uci.edu", "ngs.ics.uci.edu"]):
+                return False
+        
+        # block authentication and session-related keywords
+        if any(x in url_lower for x in ["auth", "login", "signup", "signin", "logout"]):
+            return False
+        
+        # block extremely long query strings
+        if len(parsed.query) > 100:
             return False
         
         #block non-content file extensions
