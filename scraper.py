@@ -90,6 +90,7 @@ def extract_next_links(url, resp):
         text = soup.get_text(separator='\n')
         # only words with 2+ letters
         words = tokenize_text(text)
+        words = [w for w in words if len(w) >= 2]
 
         # update longest page
         if len(words) > longest_page["word_count"]:
