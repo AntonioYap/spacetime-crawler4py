@@ -30,6 +30,23 @@ STOP_WORDS = {
     "yourself", "yourselves"
 }
 
+def tokenize_text(text: str) -> list[str]:
+    # reads a string and returns a list of alphanumeric tokens.
+    tokens = []
+    for line in text.splitlines():
+        current_token = []
+        for char in line:
+            if char.isascii() and char.isalnum():
+                current_token.append(char.lower())
+            else:
+                if current_token:
+                    tokens.append("".join(current_token))
+                    current_token = []
+        if current_token:
+            tokens.append("".join(current_token))
+            
+    return tokens
+
 def scraper(url, resp):
     # check if the current URL itself is valid before doing anything
     if not is_valid(url):
@@ -70,9 +87,9 @@ def extract_next_links(url, resp):
         soup = BeautifulSoup(resp.raw_response.content, "lxml")
 
         # extract and count words for report
-        text = soup.get_text()
+        text = soup.get_text(separator='\n')
         # only words with 2+ letters
-        words = re.findall(r"[a-zA-Z]{2,}", text.lower())
+        words = tokenize_text(text)
 
         # update longest page
         if len(words) > longest_page["word_count"]:
