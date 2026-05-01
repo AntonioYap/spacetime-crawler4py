@@ -1,10 +1,8 @@
 import re
-import warnings
 from urllib.parse import urlparse, urljoin, urldefrag
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from bs4 import BeautifulSoup
 from collections import defaultdict
 
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 #global data structures for report
 unique_pages = set()
@@ -33,60 +31,59 @@ STOP_WORDS = {
 }
 
 def scraper(url, resp):
-    #check if the current URL itself is valid before doing anything
+    # check if the current URL itself is valid before doing anything
     if not is_valid(url):
         return []
     
-    #defragment and check if page has been seen before 
+    # defragment and check if page has been seen before
     defrag_url, _ = urldefrag(url)
     if defrag_url in unique_pages:
         return []
-    # if seen, mark as seen so it won't be proccessed again
     unique_pages.add(defrag_url)
-    
-    #only now do the expensive parsing
+
+    # print progress every 50 pages
+    if len(unique_pages) % 50 == 0:
+        print(f"Progress: {len(unique_pages)} pages crawled")
+
+    # only now do the expensive parsing
     links = extract_next_links(defrag_url, resp)
     return [link for link in links if is_valid(link)]
 
 def extract_next_links(url, resp):
     if resp.status != 200 or not resp.raw_response:
         return []
+    
     content_type = resp.raw_response.headers.get("Content-Type", "").lower()
 
-    #validate response, avoid xml traps and non-html files
+    # validate response, avoid xml traps and non-html files
     if "text/html" not in content_type or "xml" in content_type:
         return []
-    
-    content_type = resp.raw_response.headers.get("Content-Type", "")
-    if "text/html" not in content_type:
-        return []
-    
-    #track subdomains for ics.uci.edu
+
+    # track subdomains for uci.edu
     parsed_url = urlparse(url)
-    hostname = parsed_url.hostname  # e.g. vision.ics.uci.edu
+    hostname = parsed_url.hostname
     if hostname and hostname.endswith(".uci.edu"):
-        # Extract just the subdomain portion
         subdomains[hostname].add(url)
-    
+
     try:
         # parse the HTML
         soup = BeautifulSoup(resp.raw_response.content, "lxml")
-        
+
         # extract and count words for report
         text = soup.get_text()
-        #only words with 2+ letters
+        # only words with 2+ letters
         words = re.findall(r"[a-zA-Z]{2,}", text.lower())
-            
+
         # update longest page
         if len(words) > longest_page["word_count"]:
             longest_page["url"] = url
             longest_page["word_count"] = len(words)
-        
+
         # update global word frequencies
         for word in words:
             if word not in STOP_WORDS:
                 word_frequencies[word] += 1
-        
+
         # extract and return all valid links
         found_links = []
         for tag in soup.find_all("a", href=True):
@@ -94,65 +91,64 @@ def extract_next_links(url, resp):
             absolute_url = urljoin(url, href)
             clean_url, _ = urldefrag(absolute_url)
             found_links.append(clean_url)
-        
+
         return found_links
 
     except Exception as e:
         print(f"Error parsing {url}: {e}")
         return []
 
-#makes sure that the URL is valid and within the allowed domains, and does not point to non-content files
 def is_valid(url):
     try:
         parsed = urlparse(url)
         url_lower = url.lower()
-        
+
         if parsed.scheme not in {"http", "https"}:
             return False
-        
-        #must be within the allowed domains
+
+        # must be within the allowed domains
         hostname = parsed.hostname
         if not hostname:
             return False
-        
+
         allowed_domains = [
             ".ics.uci.edu",
             ".cs.uci.edu",
             ".informatics.uci.edu",
             ".stat.uci.edu"
         ]
-        
+
         if not any(hostname.endswith(domain) for domain in allowed_domains):
             return False
 
         # --- TRAP FILTERING SECTION ---
-            
+
         # block common path traps
         path_lower = parsed.path.lower()
         if any(x in path_lower for x in ["doku.php", "ical", "tribe", "events", "pix"]):
             return False
-        
+
         # block repeat directory traps (e.g., /folder/folder/folder/)
         if re.match(r"^.*?(.+?/).*?\1.*?\1.*$", path_lower):
             return False
-        
+
         # block grape.ics
         if "grape.ics.uci.edu" in hostname:
             return False
-        
+
         # block subdomains for calendars/dynamic content
         if any(sub in hostname for sub in ["wics.ics.uci.edu", "ngs.ics.uci.edu"]):
-                return False
-        
+            return False
+
         # block authentication and session-related keywords
         if any(x in url_lower for x in ["auth", "login", "signup", "signin", "logout"]):
             return False
-        
+
         # block extremely long query strings
         if len(parsed.query) > 100:
             return False
-        
-        #block non-content file extensions
+
+        # block non-content file extensions
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
             + r"|png|tiff?|mid|mp2|mp3|mp4"
@@ -168,3 +164,19 @@ def is_valid(url):
     except TypeError:
         print("TypeError for", parsed)
         raise
+
+def print_report():
+    print(f"\n--- CRAWLER REPORT ---")
+
+    print(f"\n1. Unique pages found: {len(unique_pages)}")
+
+    print(f"\n2. Longest page: {longest_page['url']} ({longest_page['word_count']} words)")
+
+    print(f"\n3. Top 50 most common words:")
+    sorted_words = sorted(word_frequencies.items(), key=lambda x: x[1], reverse=True)
+    for word, count in sorted_words[:50]:
+        print(f"   {word}: {count}")
+
+    print(f"\n4. Subdomains ({len(subdomains)} total):")
+    for subdomain in sorted(subdomains.keys()):
+        print(f"   {subdomain}, {len(subdomains[subdomain])}")
